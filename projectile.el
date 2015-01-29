@@ -122,10 +122,14 @@ file on a remote file system such as tramp.
                  (integer :tag "Seconds")))
 
 (defcustom projectile-require-project-root t
-  "Require the presence of a project root to operate when true.
-Otherwise consider the current directory the project root."
+  "Require the presence of a project root to operate.
+Otherwise consider the current directory the project root. This
+can also be the symbol `prompt', to prompt the user whenever a
+root directory is required."
   :group 'projectile
-  :type 'boolean)
+  :type '(choice (const :tag "Prompt" 'prompt)
+                 (const :tag "Use current directory" nil)
+                 (const :tag "Throw an error" t)))
 
 (defcustom projectile-completion-system 'ido
   "The completion system to be used by Projectile."
@@ -653,9 +657,10 @@ The current directory is assumed to be the project's root otherwise."
                     value))))
           nil
           projectile-project-root-files-functions)
-         (if projectile-require-project-root
-             (error "You're not in a project")
-           default-directory)))))
+         (pcase projectile-require-project-root
+           (`t (error "You're not in a project"))
+           (`prompt (read-directory-name "Project root: "))
+           (`nil default-directory))))))
 
 (defun projectile-file-truename (file-name)
   "Return the truename of FILE-NAME.
@@ -666,15 +671,19 @@ A thin wrapper around `file-truename' that handles nil."
 (defun projectile-project-p ()
   "Check if we're in a project."
   (condition-case nil
-      (projectile-project-root)
+      (let ((projectile-require-project-root
+             (if (eq 'prompt
+                     projectile-require-project-root)
+                 t
+               projectile-require-project-root)))
+        (projectile-project-root))
     (error nil)))
 
 (defun projectile-project-name ()
   "Return project name."
   (let ((project-root
-         (condition-case nil
-             (projectile-project-root)
-           (error default-directory))))
+         (let ((projectile-require-project-root nil))
+             (projectile-project-root))))
     (file-name-nondirectory (directory-file-name project-root))))
 
 
