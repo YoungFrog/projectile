@@ -491,12 +491,12 @@ A wrapper around `file-exists-p' with additional caching support."
 With a prefix argument ARG prompts for the name of the project whose cache
 to invalidate."
   (interactive "P")
+  (setq projectile-project-root-cache (make-hash-table :test 'equal))
   (let ((project-root
          (if arg
              (completing-read "Remove cache for: "
                               (projectile-hash-keys projectile-projects-cache))
            (projectile-project-root))))
-    (setq projectile-project-root-cache (make-hash-table :test 'equal))
     (remhash project-root projectile-projects-cache)
     (projectile-serialize-cache)
     (when projectile-verbose
