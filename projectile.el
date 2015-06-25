@@ -2188,9 +2188,12 @@ With a prefix ARG invokes `projectile-commander' instead of
 `projectile-switch-project-action.'"
   (interactive "P")
   (-if-let (projects (projectile-relevant-known-projects))
-      (projectile-switch-project-by-name
-       (projectile-completing-read "Switch to project: " projects)
-       arg)
+      (let ((project (projectile-completing-read "Switch to project: " projects)))
+        (if (projectile-project-p project)
+            (projectile-switch-project-by-name project arg)
+          (when (member project projectile-known-projects)
+            (projectile-remove-known-project project))
+          (user-error "Not a project: %s" project)))
     (error "There are no known projects")))
 
 (defun projectile-switch-project-by-name (project-to-switch &optional arg)
