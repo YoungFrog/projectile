@@ -690,11 +690,12 @@ A thin wrapper around `file-truename' that handles nil."
   (when file-name
     (file-truename file-name)))
 
-(defun projectile-project-p ()
+(defun projectile-project-p (&optional project)
   "Check if we're in a project."
-  (condition-case nil
-      (projectile-project-root)
-    (error nil)))
+  (let ((default-directory (or project default-directory)))
+    (condition-case nil
+        (projectile-project-root)
+      (error nil))))
 
 (defun projectile-project-name ()
   "Return project name."
