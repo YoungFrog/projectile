@@ -485,13 +485,18 @@ A wrapper around `file-exists-p' with additional caching support."
                 (run-with-timer 10 nil 'projectile-file-exists-cache-cleanup)))
         (equal value 'found)))))
 
+(defun projectile-invalidate-root-cache ()
+  "Invalidate the cache of project roots."
+  (interactive)
+  (setq projectile-project-root-cache (make-hash-table :test 'equal)))
+
 (defun projectile-invalidate-cache (arg)
   "Remove the current project's files from `projectile-projects-cache'.
 
 With a prefix argument ARG prompts for the name of the project whose cache
 to invalidate."
   (interactive "P")
-  (setq projectile-project-root-cache (make-hash-table :test 'equal))
+  (projectile-invalidate-root-cache)
   (let ((project-root
          (if arg
              (completing-read "Remove cache for: "
