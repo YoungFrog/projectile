@@ -6,7 +6,7 @@
 ;; URL: https://github.com/bbatsov/projectile
 ;; Keywords: project, convenience
 ;; Version: 0.13.0-cvs
-;; Package-Requires: ((dash "1.5.0") (pkg-info "0.4"))
+;; Package-Requires: ((dash "2.11.0") (pkg-info "0.4"))
 
 ;; This file is NOT part of GNU Emacs.
 
@@ -208,6 +208,7 @@ and `projectile-buffers-with-file-or-process'."
     "build.gradle"       ; Gradle project file
     "Gemfile"            ; Bundler file
     "requirements.txt"   ; Pip file
+    "setup.py"           ; Setuptools file
     "tox.ini"            ; Tox file
     "package.json"       ; npm package file
     "gulpfile.js"        ; Gulp build file
@@ -217,16 +218,8 @@ and `projectile-buffers-with-file-or-process'."
     "Cargo.toml"         ; Cargo project file
     "mix.exs"            ; Elixir mix project file
     )
-  "A list of files considered to mark the root of a project."
-  :group 'projectile
-  :type '(repeat string))
-
-(defcustom projectile-project-root-files-top-down-recurring
-  '(".svn" ; Svn VCS root dir
-    "CVS"  ; Csv VCS root dir
-    "Makefile")
   "A list of files considered to mark the root of a project.
-This root files pattern stops at the parentmost match."
+The topmost match has precedence."
   :group 'projectile
   :type '(repeat string))
 
@@ -239,8 +232,19 @@ This root files pattern stops at the parentmost match."
     "_darcs"      ; Darcs VCS root dir
     )
   "A list of files considered to mark the root of a project.
-This root files pattern overrides discovery of any root files
-pattern that would have found a project root in a subdirectory."
+The bottommost (parentmost) match has precedence."
+  :group 'projectile
+  :type '(repeat string))
+
+(defcustom projectile-project-root-files-top-down-recurring
+  '(".svn" ; Svn VCS root dir
+    "CVS"  ; Csv VCS root dir
+    "Makefile")
+  "A list of files considered to mark the root of a project.
+The search starts at the top and descends down till a directory
+that contains a match file but its parent does not.  Thus, it's a
+bottommost match in the topmost sequence of directories
+containing a root file."
   :group 'projectile
   :type '(repeat string))
 
@@ -405,8 +409,27 @@ synchronized with `projectile-known-projects-file'.")
 (defcustom projectile-ignored-projects nil
   "A list of projects not to be added to `projectile-known-projects'."
   :group 'projectile
-  :type 'list
+  :type '(repeat :tag "Project list" directory)
   :package-version '(projectile . "0.11.0"))
+
+(defcustom projectile-ignored-project-function nil
+  "Function to decide if a project is added to `projectile-known-projects'.
+
+Can be either nil, or a function that takes the truename of the
+project root as argument and returns non-nil if the project is to
+be ignored or nil otherwise.
+
+This function is only called if the project is not listed in
+`projectile-ignored-projects'.
+
+A suitable candidate would be `file-remote-p' to ignore remote
+projects."
+  :group 'projectile
+  :type '(choice
+          (const :tag "Nothing" nil)
+          (const :tag "Remote files" file-remote-p)
+          function)
+  :package-version '(projectile . "0.13.0"))
 
 
 ;;; Version information
@@ -554,10 +577,10 @@ The cache is created both in memory and on the hard drive."
 (defun projectile-cache-current-file ()
   "Add the currently visited file to the cache."
   (interactive)
-  (let* ((current-project (projectile-project-root))
-         (abs-current-file (buffer-file-name (current-buffer)))
-         (current-file (file-relative-name abs-current-file current-project)))
+  (let ((current-project (projectile-project-root)))
     (when (gethash (projectile-project-root) projectile-projects-cache)
+      (let* ((abs-current-file (file-truename (buffer-file-name (current-buffer))))
+            (current-file (file-relative-name abs-current-file current-project)))
       (unless (or (projectile-file-cached-p current-file current-project)
                   (projectile-ignored-directory-p (file-name-directory abs-current-file))
                   (projectile-ignored-file-p abs-current-file))
@@ -567,7 +590,7 @@ The cache is created both in memory and on the hard drive."
         (projectile-serialize-cache)
         (message "File %s added to project %s cache."
                  (propertize current-file 'face 'font-lock-keyword-face)
-                 (propertize current-project 'face 'font-lock-keyword-face))))))
+                 (propertize current-project 'face 'font-lock-keyword-face)))))))
 
 ;; cache opened files automatically to reduce the need for cache invalidation
 (defun projectile-cache-files-find-file-hook ()
@@ -628,61 +651,55 @@ which we're looking."
             ((equal file (setq file (file-name-directory
                                      (directory-file-name file))))
              (setq file nil))))
-    (if root (file-name-as-directory root))))
-
-(defun projectile-root-bottom-up (dir &optional list)
-  "Identify a project root in DIR by looking at `projectile-project-root-files-bottom-up'.
-Returns a project root directory path or nil if not found."
-  (--reduce-from
-   (or acc
-       (projectile-locate-dominating-file dir it))
-   nil
-   (or list projectile-project-root-files-bottom-up)))
+    (and root (expand-file-name (file-name-as-directory root)))))
 
 (defun projectile-root-top-down (dir &optional list)
-  "Identify a project root in DIR by looking at `projectile-project-root-files'.
-Returns a project root directory path or nil if not found."
+  "Identify a project root in DIR by top-down search for files in LIST.
+If LIST is nil, use `projectile-project-root-files' instead.
+Return the first (topmost) matched directory or nil if not found."
   (projectile-locate-dominating-file
    dir
    (lambda (dir)
      (--first (projectile-file-exists-p (expand-file-name it dir))
               (or list projectile-project-root-files)))))
 
+(defun projectile-root-bottom-up (dir &optional list)
+  "Identify a project root in DIR by bottom-up search for files in LIST.
+If LIST is nil, use `projectile-project-root-files-bottom-up' instead.
+Return the first (bottommost) matched directory or nil if not found."
+  (--some (projectile-locate-dominating-file dir it)
+          (or list projectile-project-root-files-bottom-up)))
+
 (defun projectile-root-top-down-recurring (dir &optional list)
-  "Identify a project root in DIR by looking at `projectile-project-root-files-top-down-recurring'.
-Returns a project root directory path or nil if not found."
-  (--reduce-from
-   (or acc
-       (projectile-locate-dominating-file
-        dir
-        (lambda (dir)
-          (and (projectile-file-exists-p (expand-file-name it dir))
-               (or (string-match locate-dominating-stop-dir-regexp (projectile-parent dir))
-                   (not (projectile-file-exists-p (expand-file-name it (projectile-parent dir)))))))))
-   nil
-   (or list projectile-project-root-files-top-down-recurring)))
+  "Identify a project root in DIR by recurring top-down search for files in LIST.
+If LIST is nil, use `projectile-project-root-files-top-down-recurring'
+instead.  Return the last (bottommost) matched directory in the
+topmost sequence of matched directories.  Nil otherwise."
+  (--some (projectile-locate-dominating-file
+           dir
+           (lambda (dir)
+             (and (projectile-file-exists-p (expand-file-name it dir))
+                  (or (string-match locate-dominating-stop-dir-regexp (projectile-parent dir))
+                      (not (projectile-file-exists-p (expand-file-name it (projectile-parent dir))))))))
+          (or list projectile-project-root-files-top-down-recurring)))
 
 (defun projectile-project-root ()
   "Retrieves the root directory of a project if available.
 The current directory is assumed to be the project's root otherwise."
-  (file-truename
-   (let ((dir (file-truename default-directory)))
-     (or (--reduce-from
-          (or acc
-              (let* ((cache-key (format "%s-%s" it dir))
-                     (cache-value (gethash cache-key projectile-project-root-cache)))
-                (if cache-value
-                    (if (eq cache-value 'no-project-root)
-                        nil
-                      cache-value)
-                  (let ((value (funcall it dir)))
-                    (puthash cache-key (or value 'no-project-root) projectile-project-root-cache)
-                    value))))
-          nil
-          projectile-project-root-files-functions)
-         (if projectile-require-project-root
-             (error "You're not in a project")
-           default-directory)))))
+  (let ((dir default-directory))
+    (or (--some (let* ((cache-key (format "%s-%s" it dir))
+                       (cache-value (gethash cache-key projectile-project-root-cache)))
+                  (if cache-value
+                      (if (eq cache-value 'no-project-root)
+                          nil
+                        cache-value)
+                    (let ((value (funcall it (file-truename dir))))
+                      (puthash cache-key (or value 'no-project-root) projectile-project-root-cache)
+                      value)))
+                projectile-project-root-files-functions)
+        (if projectile-require-project-root
+            (error "You're not in a project")
+          default-directory))))
 
 (defun projectile-file-truename (file-name)
   "Return the truename of FILE-NAME.
@@ -702,8 +719,10 @@ A thin wrapper around `file-truename' that handles nil."
   (let ((project-root
          (condition-case nil
              (projectile-project-root)
-           (error default-directory))))
-    (file-name-nondirectory (directory-file-name project-root))))
+           (error nil))))
+    (if project-root
+        (file-name-nondirectory (directory-file-name project-root))
+      "-")))
 
 
 ;;; Project indexing
@@ -739,12 +758,10 @@ Files are returned as relative paths to the project root."
 
 (defun projectile-dir-files-external (root directory)
   "Get the files for ROOT under DIRECTORY using external tools."
-  (let ((default-directory directory)
-        (files-list nil))
-    (setq files-list (-map (lambda (f)
-                             (file-relative-name (expand-file-name f directory) root))
-                           (projectile-get-repo-files)))
-    files-list))
+  (let ((default-directory directory))
+    (-map (lambda (file)
+            (file-relative-name (expand-file-name file directory) root))
+          (projectile-get-repo-files))))
 
 (defcustom projectile-git-command "git ls-files -zco --exclude-standard"
   "Command used by projectile to get the files in a git project."
@@ -858,7 +875,8 @@ function is executing."
                        '("." ".." ".svn" ".cvs")))
      (progress-reporter-update progress-reporter)
      (if (file-directory-p it)
-         (unless (projectile-ignored-directory-p it)
+         (unless (projectile-ignored-directory-p
+                  (file-name-as-directory it))
            (projectile-index-directory it patterns progress-reporter))
        (unless (projectile-ignored-file-p it)
          (list it))))
@@ -939,7 +957,7 @@ opened through use of recentf."
 
 (defun projectile-project-buffer-names ()
   "Get a list of project buffer names."
-  (-map 'buffer-name (projectile-project-buffers)))
+  (-map #'buffer-name (projectile-project-buffers)))
 
 (defun projectile-prepend-project-name (string)
   "Prepend the current project's name to STRING."
@@ -1011,7 +1029,7 @@ Only buffers not visible in windows are returned."
 (defun projectile-ignored-files ()
   "Return list of ignored files."
   (-map
-   'projectile-expand-root
+   #'projectile-expand-root
    (append
     projectile-globally-ignored-files
     (projectile-project-ignored-files))))
@@ -1019,9 +1037,9 @@ Only buffers not visible in windows are returned."
 (defun projectile-ignored-directories ()
   "Return list of ignored directories."
   (-map
-   'file-name-as-directory
+   #'file-name-as-directory
    (-map
-    'projectile-expand-root
+    #'projectile-expand-root
     (append
      projectile-globally-ignored-directories
      (projectile-project-ignored-directories)))))
@@ -1138,7 +1156,7 @@ https://github.com/abo-abo/swiper")))
                     (gethash (projectile-project-root) projectile-projects-cache))))
     ;; nothing is cached
     (unless files
-      (setq files (-mapcat 'projectile-dir-files
+      (setq files (-mapcat #'projectile-dir-files
                            (projectile-get-project-directories)))
       ;; cache the resulting list of files
       (when projectile-enable-caching
@@ -1154,8 +1172,8 @@ https://github.com/abo-abo/swiper")))
 
 (defun projectile-current-project-dirs ()
   "Return a list of dirs for the current project."
-  (-remove 'null (-distinct
-                  (-map 'file-name-directory
+  (-remove #'null (-distinct
+                  (-map #'file-name-directory
                         (projectile-current-project-files)))))
 
 (defun projectile-hash-keys (hash)
@@ -1442,16 +1460,6 @@ With a prefix ARG invalidates the cache first."
                                           (projectile-current-project-test-files))))
     (find-file (expand-file-name file (projectile-project-root)))))
 
-(defcustom projectile-test-files-prefixes '("test_")
-  "Some common prefixes of test files."
-  :group 'projectile
-  :type '(repeat string))
-
-(defcustom projectile-test-files-suffices '("_test" "_spec" "Spec" "Test" "-test")
-  "Some common suffices of test files."
-  :group 'projectile
-  :type '(repeat string))
-
 (defun projectile-test-files (files)
   "Return only the test FILES."
   (-filter 'projectile-test-file-p files))
@@ -1459,9 +1467,9 @@ With a prefix ARG invalidates the cache first."
 (defun projectile-test-file-p (file)
   "Check if FILE is a test file."
   (or (--any? (string-prefix-p it (file-name-nondirectory file))
-              projectile-test-files-prefixes)
-      (--any? (string-suffix-p it (file-name-sans-extension file))
-              projectile-test-files-suffices)))
+              (-non-nil (list (funcall projectile-test-prefix-function (projectile-project-type)))))
+      (--any? (string-suffix-p it (file-name-nondirectory file))
+              (-non-nil (list (funcall projectile-test-suffix-function (projectile-project-type)))))))
 
 (defun projectile-current-project-test-files ()
   "Return a list of test files for the current project."
@@ -1474,12 +1482,14 @@ With a prefix ARG invalidates the cache first."
 (defvar projectile-ruby-test '("Gemfile" "lib" "test"))
 (defvar projectile-django '("manage.py"))
 (defvar projectile-python-pip '("requirements.txt"))
-(defvar projectile-python-egg '("setup.py"))
+(defvar projectile-python-pkg '("setup.py"))
+(defvar projectile-python-tox '("tox.ini"))
 (defvar projectile-scons '("SConstruct"))
 (defvar projectile-maven '("pom.xml"))
 (defvar projectile-gradle '("build.gradle"))
 (defvar projectile-grails '("application.properties" "grails-app"))
-(defvar projectile-lein '("project.clj"))
+(defvar projectile-lein-test '("project.clj"))
+(defvar projectile-lein-midje '("project.clj" ".midje.clj"))
 (defvar projectile-rebar '("rebar"))
 (defvar projectile-sbt '("build.sbt"))
 (defvar projectile-make '("Makefile"))
@@ -1490,26 +1500,35 @@ With a prefix ARG invalidates the cache first."
 (defvar projectile-r '("DESCRIPTION"))
 
 (defun projectile-go ()
+  "Check if a project contains Go source files."
   (-any? (lambda (file)
-           (string= (file-name-extension file) "go")) (projectile-current-project-files)))
+           (string= (file-name-extension file) "go"))
+         (projectile-current-project-files)))
 
 (defcustom projectile-go-function 'projectile-go
   "Function to determine if project's type is go."
   :group 'projectile
   :type 'function)
 
+(defvar-local projectile-project-type nil
+  "Buffer local var for overriding the auto-detected project type.
+Normally you'd set this from .dir-locals.el.")
+
 (defun projectile-project-type ()
   "Determine the project's type based on its structure."
   (cond
+   (projectile-project-type projectile-project-type)
    ((projectile-verify-files projectile-rails-rspec) 'rails-rspec)
    ((projectile-verify-files projectile-rails-test) 'rails-test)
    ((projectile-verify-files projectile-ruby-rspec) 'ruby-rspec)
    ((projectile-verify-files projectile-ruby-test) 'ruby-test)
    ((projectile-verify-files projectile-django) 'django)
+   ((projectile-verify-files projectile-python-tox) 'python-tox)
    ((projectile-verify-files projectile-python-pip)'python)
-   ((projectile-verify-files projectile-python-egg) 'python)
+   ((projectile-verify-files projectile-python-pkg) 'python)
    ((projectile-verify-files projectile-symfony) 'symfony)
-   ((projectile-verify-files projectile-lein) 'lein)
+   ((projectile-verify-files projectile-lein-midje) 'lein-midje)
+   ((projectile-verify-files projectile-lein-test) 'lein-test)
    ((projectile-verify-files projectile-scons) 'scons)
    ((projectile-verify-files projectile-maven) 'maven)
    ((projectile-verify-files projectile-gradle) 'gradle)
@@ -1562,6 +1581,34 @@ PROJECT-ROOT is the targeted directory.  If nil, use
    ((projectile-locate-dominating-file project-root ".svn") 'svn)
    (t 'none)))
 
+(defun projectile--test-name-for-impl-name (impl-file-path)
+  (let* ((project-type (projectile-project-type))
+         (impl-file-name (file-name-sans-extension (file-name-nondirectory impl-file-path)))
+         (impl-file-ext (file-name-extension impl-file-path))
+         (test-prefix (funcall projectile-test-prefix-function project-type))
+         (test-suffix (funcall projectile-test-suffix-function project-type)))
+    (cond
+     (test-prefix (concat test-prefix impl-file-name "." impl-file-ext))
+     (test-suffix (concat impl-file-name test-suffix "." impl-file-ext))
+     (t (error "Project type not supported!")))))
+
+(defun projectile-create-test-file-for (impl-file-path)
+  (let* ((test-file (projectile--test-name-for-impl-name impl-file-path))
+         (test-dir (replace-regexp-in-string "src/" "test/" (file-name-directory impl-file-path))))
+    (unless (file-exists-p (expand-file-name test-file test-dir))
+      (progn (unless (file-exists-p test-dir)
+               (make-directory test-dir :create-parents))
+             (concat test-dir test-file)))))
+
+(defcustom projectile-create-missing-test-files nil
+  "During toggling, if non-nil enables creating test files if not found.
+
+When not-nil, every call to projectile-find-implementation-or-test-*
+creates test files if not found on the file system. Defaults to nil.
+It assumes the test/ folder is at the same level as src/."
+  :group 'projectile
+  :type 'boolean)
+
 (defun projectile-find-implementation-or-test (file-name)
   "Given a FILE-NAME return the matching implementation or test filename."
   (unless file-name (error "The current buffer is not visiting a file"))
@@ -1575,7 +1622,9 @@ PROJECT-ROOT is the targeted directory.  If nil, use
     (let ((test-file (projectile-find-matching-test file-name)))
       (if test-file
           (projectile-expand-root test-file)
-        (error "No matching test file found")))))
+        (if projectile-create-missing-test-files
+            (projectile-create-test-file-for file-name)
+          (error "No matching test file found"))))))
 
 ;;;###autoload
 (defun projectile-find-implementation-or-test-other-window ()
@@ -1610,13 +1659,14 @@ PROJECT-ROOT is the targeted directory.  If nil, use
 (defun projectile-test-prefix (project-type)
   "Find default test files prefix based on PROJECT-TYPE."
   (cond
-   ((member project-type '(django python)) "test_")))
+   ((member project-type '(django python)) "test_")
+   ((member project-type '(lein-midje)) "t_")))
 
 (defun projectile-test-suffix (project-type)
   "Find default test files suffix based on PROJECT-TYPE."
   (cond
    ((member project-type '(rails-rspec ruby-rspec)) "_spec")
-   ((member project-type '(rails-test ruby-test lein go)) "_test")
+   ((member project-type '(rails-test ruby-test lein-test go)) "_test")
    ((member project-type '(scons)) "test")
    ((member project-type '(maven symfony)) "Test")
    ((member project-type '(gradle grails)) "Spec")))
@@ -1687,7 +1737,7 @@ This is a subset of `grep-read-files', where either a matching entry from
                  (setq alias (car aliases)
                        aliases (cdr aliases))
                  (if (string-match (mapconcat
-                                    'wildcard-to-regexp
+                                    #'wildcard-to-regexp
                                     (split-string (cdr alias) nil t)
                                     "\\|")
                                    fn)
@@ -1726,7 +1776,7 @@ to `projectile-grep-default-files'."
         ;; paths for find-grep should relative and without trailing /
         (let ((grep-find-ignored-directories
                (-union (--map (directory-file-name (file-relative-name it root-dir))
-                              (cdr (projectile-ignored-directories)))
+                              (projectile-ignored-directories))
                        grep-find-ignored-directories))
               (grep-find-ignored-files
                (-union (-map (lambda (file)
@@ -1810,7 +1860,7 @@ regular expression."
 
 (defun projectile--tags (completion-table)
   "Find tags using COMPLETION-TABLE."
-  (-reject 'null
+  (-reject #'null
            (-map (lambda (x)
                    (unless (integerp x)
                      (prin1-to-string x t)))
@@ -1891,8 +1941,8 @@ files in the project."
                                  " .")))))
         (projectile-files-from-cmd cmd directory))
     ;; we have to reject directories as a workaround to work with git submodules
-    (-reject 'file-directory-p
-             (-map 'projectile-expand-root (projectile-dir-files directory)))))
+    (-reject #'file-directory-p
+             (-map #'projectile-expand-root (projectile-dir-files directory)))))
 
 (defun projectile-replace (&optional arg)
   "Replace a string in the project using `tags-query-replace'.
@@ -1928,7 +1978,7 @@ to run the replacement."
                  (length buffers) name))
         ;; we take care not to kill indirect buffers directly
         ;; as we might encounter them after their base buffers are killed
-        (mapc 'kill-buffer (-remove 'buffer-base-buffer buffers)))))
+        (mapc #'kill-buffer (-remove 'buffer-base-buffer buffers)))))
 
 ;;;###autoload
 (defun projectile-save-project-buffers ()
@@ -1989,6 +2039,7 @@ For git projects `magit-status-internal' is used if available."
 (defvar projectile-django-test-cmd "python manage.py test")
 (defvar projectile-python-compile-cmd "python setup.py build")
 (defvar projectile-python-test-cmd "python -m unittest discover")
+(defvar projectile-python-tox-test-cmd "tox")
 (defvar projectile-symfony-compile-cmd "app/console server:run")
 (defvar projectile-symfony-test-cmd "phpunit -c app ")
 (defvar projectile-scons-compile-cmd "scons")
@@ -2001,6 +2052,7 @@ For git projects `magit-status-internal' is used if available."
 (defvar projectile-grails-test-cmd "grails test-app")
 (defvar projectile-lein-compile-cmd "lein compile")
 (defvar projectile-lein-test-cmd "lein test")
+(defvar projectile-lein-midje-test-cmd "lein midje")
 (defvar projectile-rebar-compile-cmd "rebar")
 (defvar projectile-rebar-test-cmd "rebar eunit")
 (defvar projectile-sbt-compile-cmd "sbt compile")
@@ -2029,6 +2081,7 @@ For git projects `magit-status-internal' is used if available."
           projectile-django-test-cmd
           projectile-python-compile-cmd
           projectile-python-test-cmd
+          projectile-python-tox-test-cmd
           projectile-symfony-compile-cmd
           projectile-symfony-test-cmd
           projectile-scons-compile-cmd
@@ -2037,6 +2090,7 @@ For git projects `magit-status-internal' is used if available."
           projectile-maven-test-cmd
           projectile-lein-compile-cmd
           projectile-lein-test-cmd
+          projectile-lein-midje-test-cmd
           projectile-rebar-compile-cmd
           projectile-rebar-test-cmd
           projectile-sbt-compile-cmd
@@ -2069,7 +2123,7 @@ For git projects `magit-status-internal' is used if available."
    ((eq project-type 'django) projectile-django-compile-cmd)
    ((eq project-type 'python) projectile-python-compile-cmd)
    ((eq project-type 'symfony) projectile-symfony-compile-cmd)
-   ((eq project-type 'lein) projectile-lein-compile-cmd)
+   ((member project-type '(lein-test lein-midje)) projectile-lein-compile-cmd)
    ((eq project-type 'make) projectile-make-compile-cmd)
    ((eq project-type 'rebar) projectile-rebar-compile-cmd)
    ((eq project-type 'scons) projectile-scons-compile-cmd)
@@ -2091,9 +2145,11 @@ For git projects `magit-status-internal' is used if available."
    ((member project-type '(rails-rspec ruby-rspec)) projectile-ruby-rspec-cmd)
    ((member project-type '(rails-test ruby-test)) projectile-ruby-test-cmd)
    ((eq project-type 'django) projectile-django-test-cmd)
+   ((eq project-type 'python-tox) projectile-python-tox-test-cmd)
    ((eq project-type 'python) projectile-python-test-cmd)
    ((eq project-type 'symfony) projectile-symfony-test-cmd)
-   ((eq project-type 'lein) projectile-lein-test-cmd)
+   ((eq project-type 'lein-test) projectile-lein-test-cmd)
+   ((eq project-type 'lein-midje) projectile-lein-midje-test-cmd)
    ((eq project-type 'make) projectile-make-test-cmd)
    ((eq project-type 'rebar) projectile-rebar-test-cmd)
    ((eq project-type 'scons) projectile-scons-test-cmd)
@@ -2135,6 +2191,10 @@ with a prefix ARG."
                               (compilation-read-command default-cmd)
                             default-cmd)))
     (puthash project-root compilation-cmd projectile-compilation-cmd-map)
+    (save-some-buffers (not compilation-ask-about-save)
+                       (lambda ()
+                         (projectile-project-buffer-p (current-buffer)
+                                                      project-root)))
     (compilation-start compilation-cmd)))
 
 (defadvice compilation-find-file (around projectile-compilation-find-file)
@@ -2298,11 +2358,17 @@ It handles the case of remote files as well. See `projectile-cleanup-known-proje
 
 (defun projectile-ignored-projects ()
   "A list of projects that should not be save in `projectile-known-projects'."
-  (-map 'file-truename projectile-ignored-projects))
+  (-map #'file-truename projectile-ignored-projects))
+
+(defun projectile-ignored-project-p (project-root)
+  "Return t if PROJECT-ROOT should not be added to `projectile-known-projects'."
+  (or (member project-root (projectile-ignored-projects))
+      (and (functionp projectile-ignored-project-function)
+           (funcall projectile-ignored-project-function project-root))))
 
 (defun projectile-add-known-project (project-root)
   "Add PROJECT-ROOT to the list of known projects."
-  (unless (member project-root (projectile-ignored-projects))
+  (unless (projectile-ignored-project-p project-root)
     (setq projectile-known-projects
           (-distinct
            (cons (abbreviate-file-name project-root)
@@ -2492,43 +2558,43 @@ is chosen."
 ;;; Minor mode
 (defvar projectile-command-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "4 a") 'projectile-find-other-file-other-window)
-    (define-key map (kbd "4 b") 'projectile-switch-to-buffer-other-window)
-    (define-key map (kbd "4 C-o") 'projectile-display-buffer)
-    (define-key map (kbd "4 d") 'projectile-find-dir-other-window)
-    (define-key map (kbd "4 f") 'projectile-find-file-other-window)
-    (define-key map (kbd "4 g") 'projectile-find-file-dwim-other-window)
-    (define-key map (kbd "4 t") 'projectile-find-implementation-or-test-other-window)
-    (define-key map (kbd "!") 'projectile-run-shell-command-in-root)
-    (define-key map (kbd "&") 'projectile-run-async-shell-command-in-root)
-    (define-key map (kbd "a") 'projectile-find-other-file)
-    (define-key map (kbd "b") 'projectile-switch-to-buffer)
-    (define-key map (kbd "c") 'projectile-compile-project)
-    (define-key map (kbd "d") 'projectile-find-dir)
-    (define-key map (kbd "D") 'projectile-dired)
-    (define-key map (kbd "e") 'projectile-recentf)
-    (define-key map (kbd "f") 'projectile-find-file)
-    (define-key map (kbd "g") 'projectile-find-file-dwim)
-    (define-key map (kbd "F") 'projectile-find-file-in-known-projects)
-    (define-key map (kbd "i") 'projectile-invalidate-cache)
-    (define-key map (kbd "I") 'projectile-ibuffer)
-    (define-key map (kbd "j") 'projectile-find-tag)
-    (define-key map (kbd "k") 'projectile-kill-buffers)
-    (define-key map (kbd "l") 'projectile-find-file-in-directory)
-    (define-key map (kbd "m") 'projectile-commander)
-    (define-key map (kbd "o") 'projectile-multi-occur)
-    (define-key map (kbd "p") 'projectile-switch-project)
-    (define-key map (kbd "P") 'projectile-test-project)
-    (define-key map (kbd "r") 'projectile-replace)
-    (define-key map (kbd "R") 'projectile-regenerate-tags)
-    (define-key map (kbd "s g") 'projectile-grep)
-    (define-key map (kbd "s s") 'projectile-ag)
-    (define-key map (kbd "S") 'projectile-save-project-buffers)
-    (define-key map (kbd "t") 'projectile-toggle-between-implementation-and-test)
-    (define-key map (kbd "T") 'projectile-find-test-file)
-    (define-key map (kbd "v") 'projectile-vc)
-    (define-key map (kbd "z") 'projectile-cache-current-file)
-    (define-key map (kbd "ESC") 'projectile-project-buffers-other-buffer)
+    (define-key map (kbd "4 a") #'projectile-find-other-file-other-window)
+    (define-key map (kbd "4 b") #'projectile-switch-to-buffer-other-window)
+    (define-key map (kbd "4 C-o") #'projectile-display-buffer)
+    (define-key map (kbd "4 d") #'projectile-find-dir-other-window)
+    (define-key map (kbd "4 f") #'projectile-find-file-other-window)
+    (define-key map (kbd "4 g") #'projectile-find-file-dwim-other-window)
+    (define-key map (kbd "4 t") #'projectile-find-implementation-or-test-other-window)
+    (define-key map (kbd "!") #'projectile-run-shell-command-in-root)
+    (define-key map (kbd "&") #'projectile-run-async-shell-command-in-root)
+    (define-key map (kbd "a") #'projectile-find-other-file)
+    (define-key map (kbd "b") #'projectile-switch-to-buffer)
+    (define-key map (kbd "c") #'projectile-compile-project)
+    (define-key map (kbd "d") #'projectile-find-dir)
+    (define-key map (kbd "D") #'projectile-dired)
+    (define-key map (kbd "e") #'projectile-recentf)
+    (define-key map (kbd "f") #'projectile-find-file)
+    (define-key map (kbd "g") #'projectile-find-file-dwim)
+    (define-key map (kbd "F") #'projectile-find-file-in-known-projects)
+    (define-key map (kbd "i") #'projectile-invalidate-cache)
+    (define-key map (kbd "I") #'projectile-ibuffer)
+    (define-key map (kbd "j") #'projectile-find-tag)
+    (define-key map (kbd "k") #'projectile-kill-buffers)
+    (define-key map (kbd "l") #'projectile-find-file-in-directory)
+    (define-key map (kbd "m") #'projectile-commander)
+    (define-key map (kbd "o") #'projectile-multi-occur)
+    (define-key map (kbd "p") #'projectile-switch-project)
+    (define-key map (kbd "P") #'projectile-test-project)
+    (define-key map (kbd "r") #'projectile-replace)
+    (define-key map (kbd "R") #'projectile-regenerate-tags)
+    (define-key map (kbd "s g") #'projectile-grep)
+    (define-key map (kbd "s s") #'projectile-ag)
+    (define-key map (kbd "S") #'projectile-save-project-buffers)
+    (define-key map (kbd "t") #'projectile-toggle-between-implementation-and-test)
+    (define-key map (kbd "T") #'projectile-find-test-file)
+    (define-key map (kbd "v") #'projectile-vc)
+    (define-key map (kbd "z") #'projectile-cache-current-file)
+    (define-key map (kbd "ESC") #'projectile-project-buffers-other-buffer)
     map)
   "Keymap for Projectile commands after `projectile-keymap-prefix'.")
 (fset 'projectile-command-map projectile-command-map)
@@ -2614,18 +2680,18 @@ Otherwise behave as if called interactively.
       (setq projectile-projects-cache
             (or (projectile-unserialize projectile-cache-file)
                 (make-hash-table :test 'equal))))
-    (add-hook 'find-file-hook 'projectile-cache-files-find-file-hook t t)
-    (add-hook 'find-file-hook 'projectile-cache-projects-find-file-hook t t)
-    (add-hook 'projectile-find-dir-hook 'projectile-cache-projects-find-file-hook)
-    (add-hook 'find-file-hook 'projectile-visit-project-tags-table t t)
-    (add-hook 'dired-before-readin-hook 'projectile-cache-projects-find-file-hook t t)
+    (add-hook 'find-file-hook #'projectile-cache-files-find-file-hook t t)
+    (add-hook 'find-file-hook #'projectile-cache-projects-find-file-hook t t)
+    (add-hook 'projectile-find-dir-hook #'projectile-cache-projects-find-file-hook)
+    (add-hook 'find-file-hook #'projectile-visit-project-tags-table t t)
+    (add-hook 'dired-before-readin-hook #'projectile-cache-projects-find-file-hook t t)
     (ad-activate 'compilation-find-file)
     (ad-activate 'delete-file))
    (t
-    (remove-hook 'find-file-hook 'projectile-cache-files-find-file-hook t)
-    (remove-hook 'find-file-hook 'projectile-cache-projects-find-file-hook t)
-    (remove-hook 'find-file-hook 'projectile-visit-project-tags-table t)
-    (remove-hook 'dired-before-readin-hook 'projectile-cache-projects-find-file-hook t)
+    (remove-hook 'find-file-hook #'projectile-cache-files-find-file-hook t)
+    (remove-hook 'find-file-hook #'projectile-cache-projects-find-file-hook t)
+    (remove-hook 'find-file-hook #'projectile-visit-project-tags-table t)
+    (remove-hook 'dired-before-readin-hook #'projectile-cache-projects-find-file-hook t)
     (ad-deactivate 'compilation-find-file)
     (ad-deactivate 'delete-file))))
 
